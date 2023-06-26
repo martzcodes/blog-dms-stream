@@ -53,6 +53,11 @@ export class BlogDmsStreamStack extends Stack {
       SecurityGroup.fromSecurityGroupId(this, `sg-${sgId}`, sgId)
     );
 
+    const dbStream = new Stream(this, `db-stream`, {
+      streamName: `db-stream`,
+      streamMode: StreamMode.ON_DEMAND,
+    });
+
     const dmsRole = new Role(this, `dms-role`, {
       roleName: `dms-vpc-role`, // need the name for this one
       assumedBy: new ServicePrincipal("dms.amazonaws.com"),
@@ -77,11 +82,6 @@ export class BlogDmsStreamStack extends Stack {
       vpcSecurityGroupIds: securityGroups.map(
         (sg) => sg.securityGroupId
       ),
-    });
-
-    const dbStream = new Stream(this, `db-stream`, {
-      streamName: `db-stream`,
-      streamMode: StreamMode.ON_DEMAND,
     });
 
     const dmsSecretRole = new Role(this, `dms-secret-role`, {
