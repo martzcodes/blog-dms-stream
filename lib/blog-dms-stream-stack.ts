@@ -149,6 +149,13 @@ export class BlogDmsStreamStack extends Stack {
       sourceEndpointArn: source.ref,
       targetEndpointArn: target.ref,
       tableMappings: JSON.stringify(dmsTableMappings),
+      replicationTaskSettings: JSON.stringify({
+        BeforeImageSettings: {
+          EnableBeforeImage: true,
+          FieldName: "before",
+          ColumnFilter: "all",
+        }
+      }),
     });
 
     const kinesisFn = new NodejsFunction(this, `stream-kinesis`, {
