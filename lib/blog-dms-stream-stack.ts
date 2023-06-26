@@ -1,18 +1,9 @@
-import * as cdk from "aws-cdk-lib";
 import { Construct } from "constructs";
-import { SelfDestructConstruct } from "@aws-community/self-destruct";
 import {
-  InstanceType,
-  InstanceClass,
-  InstanceSize,
+  IVpc,
+  SecurityGroup,
   Vpc,
 } from "aws-cdk-lib/aws-ec2";
-import {
-  DatabaseCluster,
-  Credentials,
-  DatabaseClusterEngine,
-  AuroraMysqlEngineVersion,
-} from "aws-cdk-lib/aws-rds";
 import {
   CfnReplicationSubnetGroup,
   CfnReplicationInstance,
@@ -33,62 +24,34 @@ import { RetentionDays } from "aws-cdk-lib/aws-logs";
 import { Provider } from "aws-cdk-lib/custom-resources";
 import { join } from "path";
 import { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
+import { Secret } from "aws-cdk-lib/aws-secretsmanager";
+import { Duration, StackProps, Stack, CustomResource } from "aws-cdk-lib";
 
 const lambdaProps = {
   runtime: Runtime.NODEJS_18_X,
   memorySize: 1028,
-  timeout: cdk.Duration.minutes(15),
+  timeout: Duration.minutes(15),
   logRetention: RetentionDays.ONE_DAY,
 };
 
-export class BlogDmsStreamStack extends cdk.Stack {
-  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+export interface BlogDmsStreamStackProps extends StackProps {
+  dbName: string;
+  secretName: string;
+  securityGroupIds: string[];
+  tableName: string;
+  vpc: IVpc;
+}
+
+export class BlogDmsStreamStack extends Stack {
+  constructor(scope: Construct, id: string, props: BlogDmsStreamStackProps) {
     super(scope, id, props);
 
-    const dbName = "blog";
-    const tableName = "examples";
-    const vpc = new Vpc(this, "vpc", {
-      maxAzs: 2,
-    });
-    const db = new DatabaseCluster(this, "db", {
-      clusterIdentifier: `db`,
-      credentials: Credentials.fromGeneratedSecret("admin"),
-      defaultDatabaseName: dbName,
-      engine: DatabaseClusterEngine.auroraMysql({
-        version: AuroraMysqlEngineVersion.VER_3_03_0,
-      }),
-      iamAuthentication: true,
-      instanceProps: {
-        instanceType: InstanceType.of(InstanceClass.T4G, InstanceSize.MEDIUM),
-        vpc,
-        vpcSubnets: {
-          onePerAz: true,
-        },
-      },
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      parameters: {
-        binlog_format: "ROW",
-        log_bin_trust_function_creators: "1",
-      },
-    });
-    db.connections.allowDefaultPortInternally();
-    const secret = db.secret!;
+    const { dbName, secretName, securityGroupIds, tableName, vpc } = props;
 
-    const initFn = new NodejsFunction(this, `db-init`, {
-      ...lambdaProps,
-      entry: join(__dirname, "lambda/initialize-db.ts"),
-      environment: {
-        SECRET_ARN: secret.secretArn,
-        DB_NAME: dbName,
-        TABLE_NAME: tableName,
-      },
-      vpc,
-      vpcSubnets: {
-        onePerAz: true,
-      },
-      securityGroups: db.connections.securityGroups,
-    });
-    db.secret?.grantRead(initFn);
+    const secret = Secret.fromSecretNameV2(this, `secret`, secretName);
+    const securityGroups = securityGroupIds.map((sgId) =>
+      SecurityGroup.fromSecurityGroupId(this, `sg-${sgId}`, sgId)
+    );
 
     const dmsRole = new Role(this, `dms-role`, {
       roleName: `dms-vpc-role`, // need the name for this one
@@ -104,13 +67,14 @@ export class BlogDmsStreamStack extends cdk.Stack {
         onePerAz: true,
       }).subnetIds,
     });
+    dmsSubnet.node.addDependency(dmsRole);
 
     const dmsRep = new CfnReplicationInstance(this, `dms-replication`, {
       replicationInstanceClass: "dms.t2.micro",
       multiAz: false,
       publiclyAccessible: false,
       replicationSubnetGroupIdentifier: dmsSubnet.ref,
-      vpcSecurityGroupIds: db.connections.securityGroups.map(
+      vpcSecurityGroupIds: securityGroups.map(
         (sg) => sg.securityGroupId
       ),
     });
@@ -122,7 +86,7 @@ export class BlogDmsStreamStack extends cdk.Stack {
 
     const dmsSecretRole = new Role(this, `dms-secret-role`, {
       assumedBy: new ServicePrincipal(
-        `dms.${cdk.Stack.of(this).region}.amazonaws.com`
+        `dms.${Stack.of(this).region}.amazonaws.com`
       ),
     });
     secret.grantRead(dmsSecretRole);
@@ -132,13 +96,13 @@ export class BlogDmsStreamStack extends cdk.Stack {
       engineName: "aurora",
       mySqlSettings: {
         secretsManagerAccessRoleArn: dmsSecretRole.roleArn,
-        secretsManagerSecretId: secret.secretArn,
+        secretsManagerSecretId: secret.secretName,
       },
     });
 
     const streamWriterRole = new Role(this, `dms-stream-role`, {
       assumedBy: new ServicePrincipal(
-        `dms.${cdk.Stack.of(this).region}.amazonaws.com`
+        `dms.${Stack.of(this).region}.amazonaws.com`
       ),
     });
 
@@ -189,7 +153,7 @@ export class BlogDmsStreamStack extends cdk.Stack {
 
     const kinesisFn = new NodejsFunction(this, `stream-kinesis`, {
       ...lambdaProps,
-      entry: join(__dirname, "lambda/binlog-kinesis.ts"),
+      entry: join(__dirname, "lambda/stream-subscriber.ts"),
       tracing: Tracing.ACTIVE,
     });
 
@@ -205,9 +169,9 @@ export class BlogDmsStreamStack extends cdk.Stack {
 
     const preDmsFn = new NodejsFunction(this, `pre-dms`, {
       ...lambdaProps,
-      entry: join(__dirname, "lambda/binlog-kinesis-pre.ts"),
+      entry: join(__dirname, "lambda/dms-pre.ts"),
       environment: {
-        STACK_NAME: cdk.Stack.of(this).stackName,
+        STACK_NAME: Stack.of(this).stackName,
       },
       initialPolicy: [
         new PolicyStatement({
@@ -229,9 +193,9 @@ export class BlogDmsStreamStack extends cdk.Stack {
 
     const postDmsFn = new NodejsFunction(this, `post-dms`, {
       ...lambdaProps,
-      entry: join(__dirname, "lambda/binlog-kinesis-post.ts"),
+      entry: join(__dirname, "lambda/dms-post.ts"),
       environment: {
-        STACK_NAME: cdk.Stack.of(this).stackName,
+        STACK_NAME: Stack.of(this).stackName,
         DMS_TASK: task.ref,
       },
       initialPolicy: [
@@ -256,7 +220,7 @@ export class BlogDmsStreamStack extends cdk.Stack {
       onEventHandler: preDmsFn,
     });
 
-    const preResource = new cdk.CustomResource(this, `pre-dms-resource`, {
+    const preResource = new CustomResource(this, `pre-dms-resource`, {
       properties: { Version: new Date().getTime().toString() },
       serviceToken: preProvider.serviceToken,
     });
@@ -265,35 +229,12 @@ export class BlogDmsStreamStack extends cdk.Stack {
       onEventHandler: postDmsFn,
     });
 
-    const postResource = new cdk.CustomResource(this, `post-dms-resource`, {
+    const postResource = new CustomResource(this, `post-dms-resource`, {
       properties: { Version: new Date().getTime().toString() },
       serviceToken: postProvider.serviceToken,
     });
 
-    const seedFn = new NodejsFunction(this, `db-seed`, {
-      ...lambdaProps,
-      entry: join(__dirname, "lambda/seed-db.ts"),
-      environment: {
-        SECRET_ARN: secret.secretArn,
-        DB_NAME: dbName,
-        TABLE_NAME: tableName,
-      },
-      vpc,
-      vpcSubnets: {
-        onePerAz: true,
-      },
-      securityGroups: db.connections.securityGroups,
-    });
-    db.secret?.grantRead(seedFn);
-
-    initFn.node.addDependency(db);
-    task.node.addDependency(initFn);
     task.node.addDependency(preResource);
     postResource.node.addDependency(task);
-    seedFn.node.addDependency(postResource);
-
-    new SelfDestructConstruct(this, "SelfDestructConstruct", {
-      duration: cdk.Duration.hours(24),
-    });
   }
 }

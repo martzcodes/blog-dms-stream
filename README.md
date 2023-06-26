@@ -1,14 +1,14 @@
-# Welcome to your CDK TypeScript project
+# Aurora MySQL Change Data Capture Stream to Kinesis with before and after data
 
-This is a blank project for CDK development with TypeScript.
+This is the example code for a blog post on https://matt.martz.codes
 
-The `cdk.json` file tells the CDK Toolkit how to execute your app.
+# ⚠️ USE AT YOUR OWN RISK ⚠️
 
-## Useful commands
+This CDK project will deploy two stacks.  An DatabaseStack which includes a small Aurora MySQL instance with enhanced binlog enabled, and a DMS stack that includes a DMS change data capture replication to kinesis.
 
-* `npm run build`   compile typescript to js
-* `npm run watch`   watch for changes and compile
-* `npm run test`    perform the jest unit tests
-* `cdk deploy`      deploy this stack to your default AWS account/region
-* `cdk diff`        compare deployed stack with current state
-* `cdk synth`       emits the synthesized CloudFormation template
+- `npm install`
+- `npx cdk deploy --all`
+
+Once deployed, DMS will automatically have its replication task started via the Custom Resources.  To see the changes in action you can manually invoke the `seed` lambda and view the output in the `kinesis-stream` lambda.
+
+***There is a cost associated with this project.***  When finished run `npx cdk destroy --all --force` and ensure that the two stacks are cleaned up in your account.

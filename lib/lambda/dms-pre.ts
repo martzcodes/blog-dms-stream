@@ -24,9 +24,7 @@ export const handler = async (
     }
     const status = await getDmsStatus({ dms, ReplicationTaskArn });
     if (status === 'running') {
-      const dmsChanges = await hasDmsChanges({ cf, StackName });
-      if (dmsChanges || event.RequestType === 'Delete') {
-        console.log('has dms changes');
+      if (event.RequestType === 'Delete' || await hasDmsChanges({ cf, StackName })) {
         // pause task
         const stopCmd = new StopReplicationTaskCommand({
           ReplicationTaskArn,
